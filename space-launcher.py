@@ -82,8 +82,8 @@ class SpaceBedrockManager:
             
             if free_gb < 1.0:
                 logging.warning("⚠️ Poco espacio en disco disponible")
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"⚠️ Error verificando espacio en disco: {str(e)}")
         
         return True
 
@@ -129,9 +129,9 @@ class SpaceBedrockManager:
                 
                 # Verificar archivos esenciales del servidor Bedrock
                 required_files = ['bedrock_server']
-                optional_files = ['server.properties', 'allowlist.json', 'permissions.json']
                 
-                has_server = any('bedrock_server' in f for f in file_list)
+                # Buscar el ejecutable en cualquier ubicación del ZIP
+                has_server = any('bedrock_server' in f and not f.endswith('/') for f in file_list)
                 if not has_server:
                     logging.error("❌ El ZIP no contiene el ejecutable 'bedrock_server'")
                     return False
@@ -181,6 +181,24 @@ class SpaceBedrockManager:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(CONFIG["data_dir"])
             
+            # Verificar si el servidor está en un subdirectorio
+            for root, dirs, files in os.walk(CONFIG["data_dir"]):
+                if "bedrock_server" in files:
+                    server_dir = Path(root)
+                    if server_dir != Path(CONFIG["data_dir"]):
+                        logging.info("⚙️ Moviendo archivos desde subdirectorio...")
+                        for item in server_dir.iterdir():
+                            if item.name != "bedrock_server":
+                                dest = Path(CONFIG["data_dir"]) / item.name
+                                if item.is_dir():
+                                    shutil.move(str(item), str(dest))
+                                else:
+                                    shutil.move(str(item), str(Path(CONFIG["data_dir"])))
+                        # Eliminar directorio vacío
+                        if not any(server_dir.iterdir()):
+                            shutil.rmtree(server_dir)
+                    break
+            
             # Verificar extracción
             if not server_path.exists():
                 logging.error("❌ El servidor no se extrajo correctamente")
@@ -188,6 +206,7 @@ class SpaceBedrockManager:
             
             # Hacer ejecutable
             server_path.chmod(0o755)
+            logging.info(f"🔒 Permisos establecidos en {server_path}")
             
             logging.info("🎉 Servidor instalado correctamente desde ZIP manual")
             return True
@@ -223,8 +242,18 @@ class SpaceBedrockManager:
         logging.info("⬇️ Descargando Cloudflared...")
         
         try:
+            # Determinar arquitectura
+            arch = platform.machine().lower()
+            if arch in ['x86_64', 'amd64']:
+                url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            elif arch in ['aarch64', 'arm64']:
+                url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            else:
+                logging.error(f"❌ Arquitectura no soportada: {arch}")
+                return False
+
             headers = {'User-Agent': CONFIG["user_agent"]}
-            req = Request(CONFIG["cloudflared_url"], headers=headers)
+            req = Request(url, headers=headers)
             
             with urlopen(req, timeout=CONFIG["timeout"]) as response:
                 with open(destination, 'wb') as f:
@@ -344,10 +373,22 @@ class SpaceBedrockManager:
                 text=True
             )
             
-            time.sleep(5)  # Esperar inicialización
+            # Esperar inicialización con timeout
+            timeout = 10
+            start_time = time.time()
+            tunnel_ready = False
             
-            if self.tunnel_process.poll() is not None:
-                logging.error("❌ El túnel Cloudflare falló al iniciar")
+            while time.time() - start_time < timeout:
+                if self.tunnel_process.poll() is not None:
+                    break
+                line = self.tunnel_process.stderr.readline()
+                if "Registered tunnel connection" in line:
+                    tunnel_ready = True
+                    break
+                time.sleep(0.5)
+            
+            if not tunnel_ready:
+                logging.error("❌ Tiempo de espera agotado para iniciar túnel")
                 return False
             
             logging.info("✅ Túnel Cloudflare iniciado")
@@ -559,6 +600,7 @@ class SpaceBedrockManager:
         Versión: Manual ZIP
         Entorno: {'Codespaces' if self.is_codespaces else 'Local/VPS'}
         Directorio: {CONFIG['data_dir']}
+        Puerto: {CONFIG['port']}
         {'='*55}
         1. Iniciar servidor
         2. Ver archivos ZIP disponibles
