@@ -36,7 +36,8 @@ CONFIG = {
     "mirrors": [
         "https://minecraft.azureedge.net/bin-linux/",
         "https://cdn-raw.overwolf.com/",
-        "https://bedrock-servers.s3.amazonaws.com/"
+        "https://edition.minecraft.net/bin-linux/",
+        "https://piston-data.mojang.com/v1/objects/",
     ],
     "cloudflared_url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
     "timeout": 45,
