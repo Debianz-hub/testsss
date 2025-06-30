@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Space Bedrock Server Launcher - Manual ZIP Version
--------------------------------------------------
-Versión modificada para usar archivos ZIP subidos manualmente
+Space Bedrock Server Launcher - Manual ZIP Version (FIXED)
+---------------------------------------------------------
+Versión corregida con inicialización de mundo y dependencias
 """
 
 import os
@@ -36,7 +36,8 @@ CONFIG = {
     "cloudflared_url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
     "timeout": 60,
     "max_retries": 3,
-    "user_agent": "SpaceBedrockLauncher/2.1 (Manual-ZIP-Version)"
+    "user_agent": "SpaceBedrockLauncher/2.1 (Manual-ZIP-Version)",
+    "world_name": "Space-World"  # Nuevo: Nombre del mundo predeterminado
 }
 
 class SpaceBedrockManager:
@@ -82,8 +83,8 @@ class SpaceBedrockManager:
             
             if free_gb < 1.0:
                 logging.warning("⚠️ Poco espacio en disco disponible")
-        except Exception as e:
-            logging.error(f"⚠️ Error verificando espacio en disco: {str(e)}")
+        except:
+            pass
         
         return True
 
@@ -129,9 +130,9 @@ class SpaceBedrockManager:
                 
                 # Verificar archivos esenciales del servidor Bedrock
                 required_files = ['bedrock_server']
+                optional_files = ['server.properties', 'allowlist.json', 'permissions.json']
                 
-                # Buscar el ejecutable en cualquier ubicación del ZIP
-                has_server = any('bedrock_server' in f and not f.endswith('/') for f in file_list)
+                has_server = any('bedrock_server' in f for f in file_list)
                 if not has_server:
                     logging.error("❌ El ZIP no contiene el ejecutable 'bedrock_server'")
                     return False
@@ -181,24 +182,6 @@ class SpaceBedrockManager:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(CONFIG["data_dir"])
             
-            # Verificar si el servidor está en un subdirectorio
-            for root, dirs, files in os.walk(CONFIG["data_dir"]):
-                if "bedrock_server" in files:
-                    server_dir = Path(root)
-                    if server_dir != Path(CONFIG["data_dir"]):
-                        logging.info("⚙️ Moviendo archivos desde subdirectorio...")
-                        for item in server_dir.iterdir():
-                            if item.name != "bedrock_server":
-                                dest = Path(CONFIG["data_dir"]) / item.name
-                                if item.is_dir():
-                                    shutil.move(str(item), str(dest))
-                                else:
-                                    shutil.move(str(item), str(Path(CONFIG["data_dir"])))
-                        # Eliminar directorio vacío
-                        if not any(server_dir.iterdir()):
-                            shutil.rmtree(server_dir)
-                    break
-            
             # Verificar extracción
             if not server_path.exists():
                 logging.error("❌ El servidor no se extrajo correctamente")
@@ -206,7 +189,6 @@ class SpaceBedrockManager:
             
             # Hacer ejecutable
             server_path.chmod(0o755)
-            logging.info(f"🔒 Permisos establecidos en {server_path}")
             
             logging.info("🎉 Servidor instalado correctamente desde ZIP manual")
             return True
@@ -242,18 +224,8 @@ class SpaceBedrockManager:
         logging.info("⬇️ Descargando Cloudflared...")
         
         try:
-            # Determinar arquitectura
-            arch = platform.machine().lower()
-            if arch in ['x86_64', 'amd64']:
-                url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            elif arch in ['aarch64', 'arm64']:
-                url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            else:
-                logging.error(f"❌ Arquitectura no soportada: {arch}")
-                return False
-
             headers = {'User-Agent': CONFIG["user_agent"]}
-            req = Request(url, headers=headers)
+            req = Request(CONFIG["cloudflared_url"], headers=headers)
             
             with urlopen(req, timeout=CONFIG["timeout"]) as response:
                 with open(destination, 'wb') as f:
@@ -373,22 +345,10 @@ class SpaceBedrockManager:
                 text=True
             )
             
-            # Esperar inicialización con timeout
-            timeout = 10
-            start_time = time.time()
-            tunnel_ready = False
+            time.sleep(5)  # Esperar inicialización
             
-            while time.time() - start_time < timeout:
-                if self.tunnel_process.poll() is not None:
-                    break
-                line = self.tunnel_process.stderr.readline()
-                if "Registered tunnel connection" in line:
-                    tunnel_ready = True
-                    break
-                time.sleep(0.5)
-            
-            if not tunnel_ready:
-                logging.error("❌ Tiempo de espera agotado para iniciar túnel")
+            if self.tunnel_process.poll() is not None:
+                logging.error("❌ El túnel Cloudflare falló al iniciar")
                 return False
             
             logging.info("✅ Túnel Cloudflare iniciado")
@@ -427,9 +387,15 @@ class SpaceBedrockManager:
         return self.start_cloudflared_tunnel(cloudflared_path)
 
     def configure_server(self):
-        """Configura server.properties optimizado"""
-        config_path = Path(CONFIG["data_dir"]) / "server.properties"
+        """Configura server.properties optimizado y crea estructura de mundo"""
+        data_dir = Path(CONFIG["data_dir"])
+        config_path = data_dir / "server.properties"
+        world_dir = data_dir / "worlds" / CONFIG["world_name"]
         
+        # Crear estructura de directorios para el mundo
+        world_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Configuración optimizada del servidor
         server_config = {
             "server-name": "Space Bedrock Server",
             "gamemode": "survival",
@@ -438,17 +404,21 @@ class SpaceBedrockManager:
             "max-players": "10",
             "online-mode": "true",
             "server-port": str(CONFIG["port"]),
-            "level-name": "Space-World",
+            "level-name": CONFIG["world_name"],  # Usar el nombre configurado
+            "level-seed": "",  # Semilla aleatoria
             "default-player-permission-level": "member",
             "player-idle-timeout": "30",
             "view-distance": "12",
             "max-threads": "0",
             "server-authoritative-movement": "server-auth",
-            "compression-threshold": "1"
+            "compression-threshold": "1",
+            "content-log-file-enabled": "true",  # Nuevo: Habilitar logs
+            "debug-output": "true"  # Nuevo: Más información en logs
         }
         
-        logging.info("⚙️ Configurando servidor...")
+        logging.info("⚙️ Configurando servidor y mundo...")
         
+        # Si existe configuración previa, conservar valores personalizados
         if config_path.exists():
             logging.info("🔄 Actualizando configuración existente...")
             existing_config = {}
@@ -458,14 +428,29 @@ class SpaceBedrockManager:
                         key, value = line.strip().split('=', 1)
                         existing_config[key] = value
             
-            # Mantener configuraciones existentes, solo actualizar las nuevas
+            # Conservar configuraciones existentes
             for key in list(server_config.keys()):
                 if key in existing_config:
                     server_config[key] = existing_config[key]
         
+        # Escribir nueva configuración
         with open(config_path, 'w') as f:
             for key, value in server_config.items():
                 f.write(f"{key}={value}\n")
+                
+        # Crear archivos esenciales del mundo si no existen
+        essential_files = [
+            "level.dat", "levelname.txt", "world_icon.jpeg"
+        ]
+        
+        for file in essential_files:
+            file_path = world_dir / file
+            if not file_path.exists():
+                try:
+                    file_path.touch()
+                    logging.info(f"📄 Creando archivo de mundo: {file}")
+                except Exception as e:
+                    logging.error(f"❌ Error creando {file}: {e}")
 
     def generate_world_backup(self):
         """Crea un backup del mundo si existe"""
@@ -496,14 +481,60 @@ class SpaceBedrockManager:
         except Exception as e:
             logging.error(f"❌ Error creando backup: {str(e)}")
 
+    def install_dependencies(self):
+        """Instala dependencias necesarias para Bedrock Server"""
+        if platform.system() != "Linux":
+            return True
+            
+        logging.info("🔍 Verificando dependencias del sistema...")
+        required = ["libcurl4", "openssl", "ca-certificates"]
+        
+        try:
+            # Verificar si ya están instalados
+            check_cmd = ["dpkg", "-s"] + required
+            result = subprocess.run(check_cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logging.info("✅ Dependencias ya instaladas")
+                return True
+                
+            logging.info("⬇️ Instalando dependencias necesarias...")
+            install_cmd = ["sudo", "apt-get", "install", "-y"] + required
+            subprocess.run(install_cmd, check=True)
+            logging.info("✅ Dependencias instaladas correctamente")
+            return True
+        except Exception as e:
+            logging.error(f"❌ Error instalando dependencias: {e}")
+            logging.warning("⚠️ El servidor podría no funcionar correctamente")
+            return False
+
+    def is_port_in_use(self, port):
+        """Comprueba si un puerto está en uso"""
+        try:
+            if platform.system() == "Windows":
+                cmd = f"netstat -an | findstr :{port}"
+            else:
+                cmd = f"lsof -i:{port} -P -n | grep LISTEN"
+                
+            result = subprocess.run(cmd, shell=True, capture_output=True)
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def start_server(self):
-        """Inicia el servidor Bedrock"""
+        """Inicia el servidor Bedrock con comprobación de puerto"""
         server_path = Path(CONFIG["data_dir"]) / "bedrock_server"
         
         if not server_path.exists():
             logging.error("❌ Servidor no encontrado")
             return False
         
+        # Comprobar si el puerto está en uso
+        if self.is_port_in_use(CONFIG["port"]):
+            logging.error(f"❌ Puerto {CONFIG['port']} ya en uso!")
+            logging.info("💡 Intenta cambiar el puerto en la configuración")
+            return False
+            
         os.chdir(CONFIG["data_dir"])
         logging.info("🚀 Iniciando servidor Space Bedrock...")
         
@@ -601,6 +632,7 @@ class SpaceBedrockManager:
         Entorno: {'Codespaces' if self.is_codespaces else 'Local/VPS'}
         Directorio: {CONFIG['data_dir']}
         Puerto: {CONFIG['port']}
+        Mundo: {CONFIG['world_name']}
         {'='*55}
         1. Iniciar servidor
         2. Ver archivos ZIP disponibles
@@ -669,6 +701,9 @@ class SpaceBedrockManager:
                 if not self.install_bedrock_server():
                     input("\nError instalando servidor. Presione Enter...")
                     continue
+                
+                # Instalar dependencias del sistema
+                self.install_dependencies()
                 
                 self.configure_server()
                 
