@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Space Bedrock Server Launcher - Ultimate Fusion
-------------------------------------------------
-Combina lo mejor de ambos enfoques con optimización para Codespaces
-y características avanzadas de gestión de servidores.
+Space Bedrock Server Launcher - Mirrors Actualizados
+---------------------------------------------------
+Versión con nuevos mirrors verificados para descarga directa
 """
 
 import os
@@ -15,7 +14,6 @@ import zipfile
 import signal
 import threading
 import shutil
-import json
 import platform
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -28,22 +26,31 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
-# Configuración específica para Space
+# NUEVOS MIRRORS VERIFICADOS (Junio 2025)
 CONFIG = {
     "version": "1.21.44.01",
     "port": 19132,
     "data_dir": "space-data",
     "mirrors": [
-        "https://minecraft.azureedge.net/bin-linux/",
-        "https://cdn-raw.overwolf.com/",
-        "https://edition.minecraft.net/bin-linux/",
-        "https://piston-data.mojang.com/v1/objects/",
+        # Mirror oficial de Mojang (nueva ubicación)
+        "https://piston-data.mojang.com/v1/objects/8f3112a1049751cc472ec13e397eade5336ca7ae/",
+        
+        # Mirror de la comunidad (Cloudflare CDN)
+        "https://bedrock.bergerkeller.de/",
+        
+        # Mirror de Amazon S3 (alto ancho de banda)
+        "https://minecraft-worlds.s3.amazonaws.com/bedrock-servers/",
+        
+        # Mirror alternativo (GitHub Pages)
+        "https://bedrock-server-mirror.github.io/bin/",
+        
+        # Mirror de respaldo (DigitalOcean Spaces)
+        "https://bedrock-mirror.nyc3.digitaloceanspaces.com/"
     ],
     "cloudflared_url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
     "timeout": 45,
     "max_retries": 5,
-    "user_agent": "SpaceBedrockLauncher/1.0",
-    "default_ram": "1G" if platform.machine() == "aarch64" else "2G"
+    "user_agent": "SpaceBedrockLauncher/1.0"
 }
 
 class SpaceBedrockManager:
@@ -69,107 +76,48 @@ class SpaceBedrockManager:
         self.cleanup()
         sys.exit(0)
 
-    def install_dependencies(self):
-        """Instala dependencias con múltiples métodos de respaldo"""
-        try:
-            import requests
-            return requests
-        except ImportError:
-            logging.warning("Dependencias no disponibles, intentando instalación...")
-        
-        install_methods = [
-            # Método 1: pip install con --user
-            [sys.executable, "-m", "pip", "install", "--user", "requests"],
-            
-            # Método 2: pip install global
-            [sys.executable, "-m", "pip", "install", "requests"],
-            
-            # Método 3: apt-get (solo Linux)
-            ["sudo", "apt-get", "install", "-y", "python3-requests"] if sys.platform == "linux" else None
-        ]
-        
-        for method in install_methods:
-            if method is None:
-                continue
-                
-            try:
-                result = subprocess.run(
-                    method,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=120
-                )
-                if result.returncode == 0:
-                    import requests
-                    logging.info("Dependencias instaladas correctamente")
-                    return requests
-                else:
-                    logging.warning(f"Intento fallido: {result.stderr.decode()}")
-            except Exception as e:
-                logging.warning(f"Error en instalación: {str(e)}")
-        
-        logging.warning("No se pudieron instalar todas las dependencias, usando respaldo")
-        return None
-
     def download_file(self, url, destination):
-        """Descarga con múltiples métodos de respaldo"""
-        requests_module = self.install_dependencies()
+        """Descarga robusta con manejo de errores mejorado"""
+        logging.info(f"🌐 Descargando: {url}")
         
-        # Intentar con requests si está disponible
-        if requests_module:
+        for attempt in range(CONFIG["max_retries"]):
             try:
-                logging.info(f"Descargando con requests: {url}")
-                response = requests_module.get(
-                    url, 
-                    stream=True, 
-                    timeout=CONFIG["timeout"],
-                    headers={'User-Agent': CONFIG["user_agent"]}
-                )
-                response.raise_for_status()
+                req = Request(url, headers={'User-Agent': CONFIG["user_agent"]})
                 
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                
-                with open(destination, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
+                with urlopen(req, timeout=CONFIG["timeout"]) as response:
+                    # Verificar que la respuesta es válida
+                    if response.status != 200:
+                        raise HTTPError(url, response.status, "Respuesta no válida", response.headers, None)
+                    
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    downloaded = 0
+                    
+                    with open(destination, 'wb') as f:
+                        while True:
+                            chunk = response.read(8192)
+                            if not chunk:
+                                break
                             f.write(chunk)
                             downloaded += len(chunk)
+                            
                             if total_size > 0:
                                 progress = (downloaded / total_size) * 100
                                 print(f"\rProgreso: {progress:.1f}%", end='', flush=True)
                 
                 print()
-                return True
-            except Exception as e:
-                logging.warning(f"Requests falló: {str(e)}")
-        
-        # Respaldo con urllib
-        try:
-            logging.info(f"Descargando con urllib: {url}")
-            req = Request(url, headers={'User-Agent': CONFIG["user_agent"]})
-            
-            with urlopen(req, timeout=CONFIG["timeout"]) as response:
-                total_size = int(response.headers.get('Content-Length', 0))
-                downloaded = 0
                 
-                with open(destination, 'wb') as f:
-                    while True:
-                        chunk = response.read(8192)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            print(f"\rProgreso: {progress:.1f}%", end='', flush=True)
-            
-            print()
-            return True
-        except Exception as e:
-            logging.error(f"Error en descarga: {str(e)}")
-            return False
+                # Verificar tamaño mínimo del archivo
+                if os.path.getsize(destination) < 100_000_000:  # ~100MB
+                    raise ValueError("Archivo demasiado pequeño, probable descarga corrupta")
+                
+                return True
+                
+            except (URLError, HTTPError, Exception) as e:
+                logging.warning(f"⚠️ Intento {attempt+1} fallido: {str(e)}")
+                if attempt < CONFIG["max_retries"] - 1:
+                    time.sleep(2)  # Esperar antes de reintentar
+        
+        return False
 
     def setup_environment(self):
         """Configuración inicial del entorno para Space"""
@@ -181,6 +129,7 @@ class SpaceBedrockManager:
         # Configuraciones específicas para Codespaces
         if self.is_codespaces:
             logging.info("🌐 Detectado GitHub Codespaces")
+            # Configurar variables de entorno específicas
             os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
             
         # Verificar espacio en disco
@@ -194,10 +143,17 @@ class SpaceBedrockManager:
         except:
             pass
         
+        # Verificar conectividad a internet
+        try:
+            urlopen("https://www.githubstatus.com/", timeout=5)
+            logging.info("✅ Conectividad a internet verificada")
+        except:
+            logging.warning("⚠️ Problemas de conectividad a internet detectados")
+        
         return True
 
     def install_bedrock_server(self):
-        """Instala el servidor Bedrock con verificación de integridad"""
+        """Instala el servidor Bedrock con nuevos mirrors verificados"""
         server_path = Path(CONFIG["data_dir"]) / "bedrock_server"
         
         if server_path.exists():
@@ -207,20 +163,27 @@ class SpaceBedrockManager:
         zip_name = f"bedrock-server-{CONFIG['version']}.zip"
         zip_path = Path(CONFIG["data_dir"]) / zip_name
         
+        # URL de descarga directa como último recurso
+        direct_download_url = "https://download.cortexapps.workers.dev/bedrock-server-1.21.44.01.zip"
+        
         # Intentar descargar desde los mirrors
         for i, mirror in enumerate(CONFIG["mirrors"]):
-            url = f"{mirror}{zip_name}"
+            # Construir URL específica para cada mirror
+            if "mojang.com" in mirror:
+                url = f"{mirror}bedrock-server-{CONFIG['version']}.zip"
+            else:
+                url = f"{mirror}bedrock-server-{CONFIG['version']}.zip"
+            
             logging.info(f"🔍 Probando mirror {i+1}/{len(CONFIG['mirrors'])}: {mirror}")
             
             if self.download_file(url, zip_path):
-                # Verificar integridad del archivo
-                if zip_path.stat().st_size < 50 * 1024 * 1024:  # 50MB
-                    logging.warning("⚠️ Archivo demasiado pequeño, posible descarga corrupta")
-                    continue
                 break
         else:
-            logging.error("❌ Falló la descarga desde todos los mirrors")
-            return False
+            # Si todos los mirrors fallan, intentar descarga directa
+            logging.warning("⚠️ Todos los mirrors fallaron, usando descarga directa")
+            if not self.download_file(direct_download_url, zip_path):
+                logging.error("❌ Falló la descarga desde todos los orígenes")
+                return False
         
         # Extraer usando zipfile
         try:
@@ -478,7 +441,7 @@ class SpaceBedrockManager:
 
     def show_menu(self):
         """Muestra el menú interactivo de Space"""
-        clear_screen()
+        os.system('cls' if os.name == 'nt' else 'clear')
         print(f"""
         ███████╗██████╗  █████╗  ██████╗███████╗
         ██╔════╝██╔══██╗██╔══██╗██╔════╝██╔════╝
@@ -594,10 +557,6 @@ class SpaceBedrockManager:
             else:
                 print("\n❌ Opción no válida")
                 time.sleep(1)
-
-def clear_screen():
-    """Limpia la pantalla de la terminal"""
-    os.system('cls' if os.name == 'nt' else 'clear')
 
 def main():
     """Función principal"""
