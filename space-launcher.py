@@ -15,6 +15,7 @@ import signal
 import threading
 import shutil
 import platform
+import json
 from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
@@ -237,51 +238,152 @@ class SpaceBedrockManager:
             logging.error(f"❌ Error descargando Cloudflared: {e}")
             return False
 
+    def install_cloudflared_apt(self):
+        """Instala Cloudflared usando el repositorio oficial de Cloudflare (Debian/Ubuntu)"""
+        try:
+            logging.info("🔑 Añadiendo clave GPG de Cloudflare...")
+            gpg_cmd = [
+                "sudo", "mkdir", "-p", "--mode=0755", "/usr/share/keyrings"
+            ]
+            subprocess.run(gpg_cmd, check=True)
+            
+            curl_gpg = subprocess.Popen(
+                ["curl", "-fsSL", "https://pkg.cloudflare.com/cloudflare-main.gpg"],
+                stdout=subprocess.PIPE
+            )
+            tee_gpg = subprocess.Popen(
+                ["sudo", "tee", "/usr/share/keyrings/cloudflare-main.gpg"],
+                stdin=curl_gpg.stdout,
+                stdout=subprocess.DEVNULL
+            )
+            curl_gpg.stdout.close()
+            tee_gpg.communicate()
+            
+            logging.info("📦 Añadiendo repositorio de Cloudflared...")
+            repo_cmd = [
+                "sudo", "sh", "-c",
+                "echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] "
+                "https://pkg.cloudflare.com/cloudflared any main' > "
+                "/etc/apt/sources.list.d/cloudflared.list"
+            ]
+            subprocess.run(repo_cmd, check=True)
+            
+            logging.info("🔄 Actualizando paquetes...")
+            subprocess.run(["sudo", "apt-get", "update"], check=True)
+            
+            logging.info("⬇️ Instalando cloudflared...")
+            subprocess.run(["sudo", "apt-get", "install", "-y", "cloudflared"], check=True)
+            
+            logging.info("✅ Cloudflared instalado correctamente via APT")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"❌ Error durante instalación APT: {e}")
+            return False
+
+    def get_cloudflare_token(self):
+        """Obtiene el token de múltiples fuentes seguras"""
+        # 1. Intenta desde variables de entorno (GitHub Secrets)
+        token = os.getenv("CLOUDFLARED_TOKEN")
+        
+        # 2. Si en Codespaces y no encontrado, verifica archivo temporal
+        if not token and self.is_codespaces:
+            token_path = Path("/workspaces/.codespaces/shared/environment-variables.json")
+            if token_path.exists():
+                try:
+                    with open(token_path, 'r') as f:
+                        env_vars = json.load(f)
+                        token = env_vars.get("CLOUDFLARED_TOKEN", "")
+                        if token:
+                            logging.info("✅ Token obtenido desde GitHub Codespaces Secrets")
+                except Exception as e:
+                    logging.error(f"⚠️ Error leyendo variables de Codespaces: {e}")
+        
+        # 3. Último recurso: archivo local (NO RECOMENDADO)
+        if not token:
+            local_token = Path(CONFIG["data_dir"]) / "cloudflare-token.txt"
+            if local_token.exists():
+                try:
+                    with open(local_token, 'r') as f:
+                        token = f.read().strip()
+                    logging.info(f"⚠️ Token obtenido desde archivo local: {local_token}")
+                except Exception as e:
+                    logging.error(f"❌ Error leyendo token local: {e}")
+        
+        return token
+
+    def start_cloudflared_tunnel(self, cloudflared_path=None):
+        """Inicia el túnel de Cloudflared"""
+        token = self.get_cloudflare_token()
+        if not token:
+            logging.error("""
+            ❌ ERROR: Token de Cloudflare no configurado
+            === INSTRUCCIONES PARA GITHUB CODESPACES ===
+            1. Ve a: https://github.com/<tu-usuario>/<tu-repo>/settings/secrets/codespaces
+            2. Crea un secret llamado CLOUDFLARED_TOKEN
+            3. Pega tu token de Cloudflare Zero Trust
+            4. Reinicia este Codespace
+            """)
+            return False
+        
+        # Mostrar solo parte del token para seguridad
+        token_display = f"{token[:4]}...{token[-4:]}" if token else "NO_TOKEN"
+        logging.info(f"🔑 Usando token: {token_display}")
+        
+        try:
+            cmd = ["cloudflared"] if cloudflared_path is None else [str(cloudflared_path)]
+            cmd.extend([
+                "tunnel", "--protocol", "udp", "run", "--token", token
+            ])
+            
+            logging.info("🌐 Iniciando túnel Cloudflare...")
+            self.tunnel_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            time.sleep(5)  # Esperar inicialización
+            
+            if self.tunnel_process.poll() is not None:
+                logging.error("❌ El túnel Cloudflare falló al iniciar")
+                return False
+            
+            logging.info("✅ Túnel Cloudflare iniciado")
+            self.connection_info = {
+                "type": "cloudflare",
+                "address": f"Consulta: cloudflared tail",
+                "port": CONFIG['port'],
+                "note": "Túnel activo usando " + ("sistema" if cloudflared_path is None else "binario local")
+            }
+            return True
+            
+        except Exception as e:
+            logging.error(f"❌ Error iniciando túnel: {e}")
+            return False
+
     def setup_cloudflared(self):
-        """Configura Cloudflared para túnel externo"""
+        """Configura Cloudflared para túnel externo (versión mejorada)"""
+        # Verificar si ya está instalado en el sistema
+        if shutil.which("cloudflared"):
+            logging.info("✅ Cloudflared ya está instalado en el sistema")
+            return self.start_cloudflared_tunnel()
+        
+        # Intentar instalación via APT en sistemas Debian
+        if platform.system() == "Linux" and any(os.path.exists(p) for p in ["/etc/debian_version", "/etc/apt/sources.list"]):
+            logging.info("🐧 Detectado sistema Debian/Ubuntu, usando instalación APT...")
+            if self.install_cloudflared_apt():
+                return self.start_cloudflared_tunnel()
+        
+        # Fallback a instalación manual
         cloudflared_path = Path(CONFIG["data_dir"]) / "cloudflared"
         
         if not cloudflared_path.exists():
             if not self.download_cloudflared(cloudflared_path):
                 return False
         
-        token = os.getenv("CLOUDFLARED_TOKEN")
-        if not token:
-            logging.warning("⚠️ CLOUDFLARED_TOKEN no configurado")
-            logging.info("💡 Para usar túnel Cloudflare:")
-            logging.info("   1. Crea una cuenta en Cloudflare Zero Trust")
-            logging.info("   2. Configura un túnel UDP")
-            logging.info("   3. Establece la variable: export CLOUDFLARED_TOKEN='tu-token'")
-            return False
-        
-        try:
-            logging.info("🌐 Iniciando túnel Cloudflare...")
-            self.tunnel_process = subprocess.Popen(
-                [str(cloudflared_path), "tunnel", "--protocol", "udp", "run", "--token", token],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            time.sleep(8)
-            
-            if self.tunnel_process.poll() is not None:
-                logging.error("❌ El túnel Cloudflare falló al iniciar")
-                return False
-            
-            self.connection_info = {
-                "type": "cloudflare",
-                "address": "Consulta los logs de Cloudflare",
-                "port": CONFIG['port'],
-                "note": "Túnel Cloudflare activo"
-            }
-            
-            logging.info("✅ Túnel Cloudflare iniciado")
-            return True
-                
-        except Exception as e:
-            logging.error(f"❌ Error iniciando túnel: {e}")
-            return False
+        return self.start_cloudflared_tunnel(cloudflared_path)
 
     def configure_server(self):
         """Configura server.properties optimizado"""
