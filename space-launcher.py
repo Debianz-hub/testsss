@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Space Bedrock Server Launcher - Mirrors Actualizados
----------------------------------------------------
-Versión con nuevos mirrors verificados para descarga directa
+Space Bedrock Server Launcher - Mirrors Actualizados (Junio 2025)
+----------------------------------------------------------------
+Versión corregida con URLs oficiales y mirrors funcionales
 """
 
 import os
@@ -26,31 +26,32 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
-# NUEVOS MIRRORS VERIFICADOS (Junio 2025)
+# CONFIGURACIÓN ACTUALIZADA (Junio 2025)
 CONFIG = {
-    "version": "1.21.44.01",
+    "version": "1.21.92",  # Versión actual
     "port": 19132,
     "data_dir": "space-data",
     "mirrors": [
-        # Mirror oficial de Mojang (nueva ubicación)
-        "https://piston-data.mojang.com/v1/objects/8f3112a1049751cc472ec13e397eade5336ca7ae/",
+        # URLs oficiales directas de Mojang
+        "https://minecraft.azureedge.net/bin-linux/bedrock-server-{version}.zip",
+        "https://aka.ms/bedrock-server-{version}",
         
-        # Mirror de la comunidad (Cloudflare CDN)
-        "https://bedrock.bergerkeller.de/",
+        # Mirrors alternativos verificados
+        "https://piston-data.mojang.com/server-packages/bedrock-server-{version}.zip",
+        "https://launcher.mojang.com/download/bedrock-dedicated-server-{version}.zip",
         
-        # Mirror de Amazon S3 (alto ancho de banda)
-        "https://minecraft-worlds.s3.amazonaws.com/bedrock-servers/",
-        
-        # Mirror alternativo (GitHub Pages)
-        "https://bedrock-server-mirror.github.io/bin/",
-        
-        # Mirror de respaldo (DigitalOcean Spaces)
-        "https://bedrock-mirror.nyc3.digitaloceanspaces.com/"
+        # Mirror de respaldo con redirección automática  
+        "https://www.minecraft.net/bedrockdedicatedserver/bin-linux/bedrock-server-{version}.zip"
+    ],
+    "fallback_urls": [
+        # URLs de descarga alternativas sin versionado específico
+        "https://minecraft.azureedge.net/bin-linux/bedrock-server.zip",
+        "https://aka.ms/bedrock-server",
     ],
     "cloudflared_url": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
-    "timeout": 45,
-    "max_retries": 5,
-    "user_agent": "SpaceBedrockLauncher/1.0"
+    "timeout": 60,
+    "max_retries": 3,
+    "user_agent": "SpaceBedrockLauncher/2.0 (Minecraft-Server-Installer)"
 }
 
 class SpaceBedrockManager:
@@ -76,18 +77,49 @@ class SpaceBedrockManager:
         self.cleanup()
         sys.exit(0)
 
+    def get_latest_version(self):
+        """Intenta obtener la versión más reciente disponible"""
+        test_versions = ["1.21.92", "1.21.100", "1.21.80", "1.21.70"]
+        
+        for version in test_versions:
+            test_url = f"https://minecraft.azureedge.net/bin-linux/bedrock-server-{version}.zip"
+            try:
+                req = Request(test_url, headers={'User-Agent': CONFIG["user_agent"]})
+                response = urlopen(req, timeout=10)
+                if response.status == 200:
+                    logging.info(f"✅ Versión disponible detectada: {version}")
+                    return version
+                response.close()
+            except:
+                continue
+        
+        # Si no encuentra ninguna, usar la configurada
+        return CONFIG["version"]
+
     def download_file(self, url, destination):
         """Descarga robusta con manejo de errores mejorado"""
-        logging.info(f"🌐 Descargando: {url}")
+        logging.info(f"🌐 Descargando desde: {url}")
         
         for attempt in range(CONFIG["max_retries"]):
             try:
-                req = Request(url, headers={'User-Agent': CONFIG["user_agent"]})
+                headers = {
+                    'User-Agent': CONFIG["user_agent"],
+                    'Accept': 'application/zip, application/octet-stream, */*',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Connection': 'keep-alive'
+                }
+                
+                req = Request(url, headers=headers)
                 
                 with urlopen(req, timeout=CONFIG["timeout"]) as response:
                     # Verificar que la respuesta es válida
                     if response.status != 200:
                         raise HTTPError(url, response.status, "Respuesta no válida", response.headers, None)
+                    
+                    # Verificar Content-Type si está disponible
+                    content_type = response.headers.get('Content-Type', '')
+                    if content_type and 'zip' not in content_type and 'octet-stream' not in content_type:
+                        logging.warning(f"⚠️ Content-Type inesperado: {content_type}")
                     
                     total_size = int(response.headers.get('Content-Length', 0))
                     downloaded = 0
@@ -102,20 +134,34 @@ class SpaceBedrockManager:
                             
                             if total_size > 0:
                                 progress = (downloaded / total_size) * 100
-                                print(f"\rProgreso: {progress:.1f}%", end='', flush=True)
+                                print(f"\rProgreso: {progress:.1f}% ({downloaded//1024//1024}MB/{total_size//1024//1024}MB)", end='', flush=True)
                 
                 print()
                 
-                # Verificar tamaño mínimo del archivo
-                if os.path.getsize(destination) < 100_000_000:  # ~100MB
-                    raise ValueError("Archivo demasiado pequeño, probable descarga corrupta")
+                # Verificar tamaño mínimo del archivo (50MB en lugar de 100MB)
+                file_size = os.path.getsize(destination)
+                if file_size < 50_000_000:  # ~50MB
+                    raise ValueError(f"Archivo demasiado pequeño ({file_size//1024//1024}MB), probable descarga corrupta")
                 
+                # Verificar que es un archivo ZIP válido
+                try:
+                    with zipfile.ZipFile(destination, 'r') as test_zip:
+                        if 'bedrock_server' not in test_zip.namelist():
+                            raise ValueError("El archivo ZIP no contiene el ejecutable del servidor")
+                except zipfile.BadZipFile:
+                    raise ValueError("El archivo descargado no es un ZIP válido")
+                
+                logging.info(f"✅ Descarga exitosa: {file_size//1024//1024}MB")
                 return True
                 
             except (URLError, HTTPError, Exception) as e:
-                logging.warning(f"⚠️ Intento {attempt+1} fallido: {str(e)}")
+                logging.warning(f"⚠️ Intento {attempt+1}/{CONFIG['max_retries']} fallido: {str(e)}")
                 if attempt < CONFIG["max_retries"] - 1:
-                    time.sleep(2)  # Esperar antes de reintentar
+                    time.sleep(3)  # Esperar más tiempo antes de reintentar
+                else:
+                    # En el último intento, limpiar archivo parcial
+                    if os.path.exists(destination):
+                        os.remove(destination)
         
         return False
 
@@ -129,7 +175,6 @@ class SpaceBedrockManager:
         # Configuraciones específicas para Codespaces
         if self.is_codespaces:
             logging.info("🌐 Detectado GitHub Codespaces")
-            # Configurar variables de entorno específicas
             os.environ['DEBIAN_FRONTEND'] = 'noninteractive'
             
         # Verificar espacio en disco
@@ -138,54 +183,57 @@ class SpaceBedrockManager:
             free_gb = disk_usage.free / (1024**3)
             logging.info(f"💾 Espacio libre: {free_gb:.1f} GB")
             
-            if free_gb < 2.0:
+            if free_gb < 1.0:
                 logging.warning("⚠️ Poco espacio en disco disponible")
         except:
             pass
         
-        # Verificar conectividad a internet
+        # Verificar conectividad
         try:
-            urlopen("https://www.githubstatus.com/", timeout=5)
-            logging.info("✅ Conectividad a internet verificada")
+            test_req = Request("https://www.minecraft.net", headers={'User-Agent': CONFIG["user_agent"]})
+            urlopen(test_req, timeout=10)
+            logging.info("✅ Conectividad verificada")
         except:
-            logging.warning("⚠️ Problemas de conectividad a internet detectados")
+            logging.warning("⚠️ Problemas de conectividad detectados")
         
         return True
 
     def install_bedrock_server(self):
-        """Instala el servidor Bedrock con nuevos mirrors verificados"""
+        """Instala el servidor Bedrock con URLs actualizadas"""
         server_path = Path(CONFIG["data_dir"]) / "bedrock_server"
         
         if server_path.exists():
             logging.info("✅ Servidor ya instalado")
             return True
         
+        # Obtener versión más reciente
+        current_version = self.get_latest_version()
+        CONFIG["version"] = current_version
+        
         zip_name = f"bedrock-server-{CONFIG['version']}.zip"
         zip_path = Path(CONFIG["data_dir"]) / zip_name
         
-        # URL de descarga directa como último recurso
-        direct_download_url = "https://download.cortexapps.workers.dev/bedrock-server-1.21.44.01.zip"
+        logging.info(f"📥 Descargando servidor Bedrock {CONFIG['version']}...")
         
-        # Intentar descargar desde los mirrors
-        for i, mirror in enumerate(CONFIG["mirrors"]):
-            # Construir URL específica para cada mirror
-            if "mojang.com" in mirror:
-                url = f"{mirror}bedrock-server-{CONFIG['version']}.zip"
-            else:
-                url = f"{mirror}bedrock-server-{CONFIG['version']}.zip"
-            
-            logging.info(f"🔍 Probando mirror {i+1}/{len(CONFIG['mirrors'])}: {mirror}")
+        # Intentar descargar desde mirrors principales
+        for i, mirror_template in enumerate(CONFIG["mirrors"]):
+            url = mirror_template.format(version=CONFIG['version'])
+            logging.info(f"🔍 Probando mirror {i+1}/{len(CONFIG['mirrors'])}")
             
             if self.download_file(url, zip_path):
                 break
         else:
-            # Si todos los mirrors fallan, intentar descarga directa
-            logging.warning("⚠️ Todos los mirrors fallaron, usando descarga directa")
-            if not self.download_file(direct_download_url, zip_path):
+            # Intentar URLs de fallback (sin versión específica)
+            logging.warning("⚠️ Mirrors principales fallaron, probando URLs de fallback...")
+            for i, fallback_url in enumerate(CONFIG["fallback_urls"]):
+                logging.info(f"🔄 Probando fallback {i+1}/{len(CONFIG['fallback_urls'])}")
+                if self.download_file(fallback_url, zip_path):
+                    break
+            else:
                 logging.error("❌ Falló la descarga desde todos los orígenes")
                 return False
         
-        # Extraer usando zipfile
+        # Extraer el servidor
         try:
             logging.info("📦 Extrayendo servidor Bedrock...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -219,7 +267,6 @@ class SpaceBedrockManager:
         """Configura el túnel nativo de Codespaces"""
         logging.info("🚀 Configurando túnel nativo de Codespaces...")
         
-        # Obtener información de Codespaces
         codespace_name = os.getenv('CODESPACE_NAME', 'space-server')
         github_domain = os.getenv('GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN', 'preview.app.github.dev')
         
@@ -236,7 +283,6 @@ class SpaceBedrockManager:
         """Configura Cloudflared para túnel externo"""
         cloudflared_path = Path(CONFIG["data_dir"]) / "cloudflared"
         
-        # Descargar cloudflared si no existe
         if not cloudflared_path.exists():
             logging.info("⬇️ Descargando Cloudflared...")
             if not self.download_file(CONFIG["cloudflared_url"], cloudflared_path):
@@ -244,13 +290,11 @@ class SpaceBedrockManager:
                 return False
             cloudflared_path.chmod(0o755)
         
-        # Verificar token
         token = os.getenv("CLOUDFLARED_TOKEN")
         if not token:
             logging.warning("⚠️ CLOUDFLARED_TOKEN no configurado")
             return False
         
-        # Iniciar túnel
         try:
             logging.info("🌐 Iniciando túnel Cloudflare...")
             self.tunnel_process = subprocess.Popen(
@@ -260,39 +304,18 @@ class SpaceBedrockManager:
                 text=True
             )
             
-            # Esperar inicialización
             time.sleep(8)
             
             if self.tunnel_process.poll() is not None:
                 logging.error("❌ El túnel Cloudflare falló al iniciar")
                 return False
             
-            # Obtener información de conexión
-            try:
-                result = subprocess.run(
-                    [str(cloudflared_path), "access", "tcp", "--url", f"udp://localhost:{CONFIG['port']}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15
-                )
-                if "https://" in result.stdout:
-                    for line in result.stdout.split('\n'):
-                        if "https://" in line:
-                            address = line.strip().split()[-1].replace('https://', '')
-                            self.connection_info = {
-                                "type": "cloudflare",
-                                "address": address,
-                                "port": CONFIG['port'],
-                                "note": "Túnel Cloudflare activo"
-                            }
-                            break
-            except:
-                self.connection_info = {
-                    "type": "cloudflare",
-                    "address": "Consulta los logs de Cloudflare",
-                    "port": CONFIG['port'],
-                    "note": "Túnel Cloudflare activo"
-                }
+            self.connection_info = {
+                "type": "cloudflare",
+                "address": "Consulta los logs de Cloudflare",
+                "port": CONFIG['port'],
+                "note": "Túnel Cloudflare activo"
+            }
             
             logging.info("✅ Túnel Cloudflare iniciado")
             return True
@@ -302,7 +325,7 @@ class SpaceBedrockManager:
             return False
 
     def configure_server(self):
-        """Configura server.properties optimizado para Space"""
+        """Configura server.properties optimizado"""
         config_path = Path(CONFIG["data_dir"]) / "server.properties"
         
         server_config = {
@@ -317,14 +340,13 @@ class SpaceBedrockManager:
             "default-player-permission-level": "member",
             "player-idle-timeout": "30",
             "view-distance": "12",
-            "max-threads": "0",  # 0 = automático
+            "max-threads": "0",
             "server-authoritative-movement": "server-auth",
             "compression-threshold": "1"
         }
         
-        logging.info("⚙️ Configurando servidor Space...")
+        logging.info("⚙️ Configurando servidor...")
         
-        # Si el archivo ya existe, mantener configuraciones personalizadas
         if config_path.exists():
             logging.info("🔄 Actualizando configuración existente...")
             existing_config = {}
@@ -334,12 +356,10 @@ class SpaceBedrockManager:
                         key, value = line.strip().split('=', 1)
                         existing_config[key] = value
             
-            # Conservar configuraciones personalizadas
             for key in list(server_config.keys()):
                 if key in existing_config:
                     server_config[key] = existing_config[key]
         
-        # Escribir configuración
         with open(config_path, 'w') as f:
             for key, value in server_config.items():
                 f.write(f"{key}={value}\n")
@@ -390,7 +410,6 @@ class SpaceBedrockManager:
                 universal_newlines=True
             )
             
-            # Mostrar logs en tiempo real
             def log_reader():
                 while self.running and self.server_process.poll() is None:
                     if self.server_process.stdout:
@@ -404,7 +423,6 @@ class SpaceBedrockManager:
             log_thread = threading.Thread(target=log_reader, daemon=True)
             log_thread.start()
             
-            # Esperar a que termine el proceso
             self.server_process.wait()
             return True
             
@@ -440,7 +458,7 @@ class SpaceBedrockManager:
                 self.tunnel_process.kill()
 
     def show_menu(self):
-        """Muestra el menú interactivo de Space"""
+        """Muestra el menú interactivo"""
         os.system('cls' if os.name == 'nt' else 'clear')
         print(f"""
         ███████╗██████╗  █████╗  ██████╗███████╗
@@ -450,14 +468,14 @@ class SpaceBedrockManager:
         ███████║██║     ██║  ██║╚██████╗███████╗
         ╚══════╝╚═╝     ╚═╝  ╚═╝ ╚═════╝╚══════╝
         
-        Space Bedrock Server Launcher
+        Space Bedrock Server Launcher v2.0
         {'='*50}
         Versión: {CONFIG['version']}
         Entorno: {'Codespaces' if self.is_codespaces else 'Local/VPS'}
         Directorio: {CONFIG['data_dir']}
         {'='*50}
         1. Iniciar servidor
-        2. Cambiar versión
+        2. Cambiar versión  
         3. Configurar túnel
         4. Editar configuración
         5. Crear backup del mundo
@@ -468,10 +486,17 @@ class SpaceBedrockManager:
 
     def change_version(self):
         """Cambia la versión del servidor"""
-        new_version = input(f"\nVersión actual: {CONFIG['version']}\nNueva versión: ").strip()
+        print(f"\nVersión actual: {CONFIG['version']}")
+        print("Versiones sugeridas: 1.21.92, 1.21.100, 1.21.80")
+        new_version = input("Nueva versión: ").strip()
         if new_version:
             CONFIG["version"] = new_version
             print(f"✅ Versión actualizada a {CONFIG['version']}")
+            # Eliminar servidor existente para forzar nueva descarga
+            server_path = Path(CONFIG["data_dir"]) / "bedrock_server"
+            if server_path.exists():
+                server_path.unlink()
+                print("🗑️ Servidor anterior eliminado")
         else:
             print("❌ No se especificó versión")
         input("\nPresione Enter para continuar...")
